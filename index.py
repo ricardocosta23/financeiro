@@ -123,7 +123,7 @@ def get_item_data(item_id, item_name):
         items(ids: [{item_id}]) {{
             id
             name
-            column_values(ids: ["numeric_mks63qc1", "numeric_mks64nh2", "dropdown_mks68t35", "numeric_mks61nvq"]) {{
+            column_values(ids: ["numeric_mks63qc1", "numeric_mks64nh2", "color_mks7xywc", "numeric_mks61nvq"]) {{
                 id
                 value
             }}
@@ -139,7 +139,7 @@ def get_item_data(item_id, item_name):
         "name": item_name,
         "numeric_mks63qc1": 0,
         "numeric_mks64nh2": 0,
-        "dropdown_mks68t35": "",
+        "color_mks7xywc": "",
         "numeric_mks61nvq": 0
     }
     
@@ -166,8 +166,8 @@ def get_item_data(item_id, item_name):
                         item_data["numeric_mks64nh2"] = float(value_str)
                     except (ValueError, TypeError):
                         item_data["numeric_mks64nh2"] = 0
-                elif col["id"] == "dropdown_mks68t35":
-                    item_data["dropdown_mks68t35"] = col["value"] or ""
+                elif col["id"] == "color_mks7xywc":
+                    item_data["color_mks7xywc"] = col["value"] or ""
                 elif col["id"] == "numeric_mks61nvq":
                     try:
                         value_str = col["value"] or "0"
@@ -280,7 +280,7 @@ def distribute_values(item_data):
         # Extract data from payload
         numeric_value = float(item_data.get("numeric_mks63qc1", 0))
         formula_value = float(item_data.get("numeric_mks64nh2", 0))
-        currency_dropdown = item_data.get("dropdown_mks68t35", "")
+        currency_dropdown = item_data.get("color_mks7xywc", "")
         limit_value = float(item_data.get("numeric_mks61nvq", 0))
         item_name = item_data.get("name", "")
         item_id = item_data.get("id", "")
@@ -298,6 +298,20 @@ def distribute_values(item_data):
         elif currency_dropdown in ['{"ids":[1]}', '{"ids":[2]}', '{"ids":[3]}', '{"ids":[4]}']:
             # Monday.com JSON format - any of these IDs are valid for processing
             valid_currency = True
+        else:
+            # Try to parse JSON format to check for dropdown IDs (Monday.com format)
+            try:
+                parsed_dropdown = json.loads(currency_dropdown)
+                if "ids" in parsed_dropdown and isinstance(parsed_dropdown["ids"], list):
+                    # Accept any dropdown with valid IDs - both Dollar (ID 1) and Euro (IDs 2,3,4) are valid
+                    valid_ids = [1, 2, 3, 4]  # 1 for Dollar, 2-4 for Euro variations
+                    if any(id_val in valid_ids for id_val in parsed_dropdown["ids"]):
+                        valid_currency = True
+                        logger.info(f"Accepted currency dropdown with IDs: {parsed_dropdown['ids']}")
+            except (json.JSONDecodeError, TypeError):
+                # If it's not JSON, check if it contains Euro text
+                if "EURO" in currency_dropdown.upper() or "€" in currency_dropdown:
+                    valid_currency = True
         
         if not valid_currency:
             logger.error(f"Invalid currency dropdown value: {currency_dropdown}")
@@ -396,29 +410,45 @@ def distribute_values(item_data):
         remaining_value = limit_value
         processed_subitems = []
         
+        # Determine deduction column based on currency
+        deduction_column = "numeric_mks6ywg8"  # Default to Euro column
+        
+        # Check if currency is Dollar to use the other column
+        is_dollar = False
+        if currency_dropdown == "$ DÓLAR":
+            is_dollar = True
+        elif currency_dropdown.startswith('{"ids":[2]') or currency_dropdown.startswith('{"ids":[3]') or currency_dropdown.startswith('{"ids":[4]'):
+            # IDs 2, 3, 4 are Dollar variants in this Monday.com dropdown
+            is_dollar = True
+        
+        # ID 1 is Euro, so we keep the default deduction_column = "numeric_mks6ywg8"
+        if is_dollar:
+            deduction_column = "numeric_mks6myhs"
+        
         logger.info(f"Starting sequential distribution from total {remaining_value} across {len(unprocessed_subitems)} eligible subitems")
         logger.info(f"Will copy numeric_mks63qc1 value ({numeric_value}) to each subitem's numeric_mks6p0bv")
+        logger.info(f"Using deduction column: {deduction_column} for currency: {currency_dropdown} (is_dollar: {is_dollar})")
         
         for subitem in unprocessed_subitems:
             if remaining_value <= 0:
                 logger.info("No remaining value to distribute, stopping")
                 break
             
-            # Get subitem deduction value (numeric_mks6ywg8) - this amount gets deducted from remaining
+            # Get subitem deduction value from the appropriate column based on currency
             subitem_deduction_value = 0
             logger.debug(f"Subitem {subitem.get('name')} column values: {[{col['id']: col['value']} for col in subitem.get('column_values', [])]}")
             for col in subitem.get("column_values", []):
-                if col["id"] == "numeric_mks6ywg8":
+                if col["id"] == deduction_column:
                     try:
                         # Monday.com returns numeric values as quoted strings, so we need to parse them
                         raw_value = col["value"] or "0"
                         # Remove quotes if present
                         clean_value = raw_value.strip('"') if isinstance(raw_value, str) else str(raw_value)
                         subitem_deduction_value = float(clean_value)
-                        logger.debug(f"Found numeric_mks6ywg8 value: {col['value']} -> {subitem_deduction_value}")
+                        logger.debug(f"Found {deduction_column} value: {col['value']} -> {subitem_deduction_value}")
                     except (ValueError, TypeError):
                         subitem_deduction_value = 0
-                        logger.debug(f"Could not parse numeric_mks6ywg8 value: {col['value']}")
+                        logger.debug(f"Could not parse {deduction_column} value: {col['value']}")
                     break
             
             # Process if there's a deduction value
@@ -445,18 +475,18 @@ def distribute_values(item_data):
                     # Remaining value is not enough - need to duplicate and split
                     logger.info(f"Remaining value {remaining_value} is not enough for subitem {subitem['name']} deduction {subitem_deduction_value}")
                     
-                    # Duplicate the subitem to create Part 2 first, then Part 1 (so Part 1 appears on top)
-                    part2_id = duplicate_subitem(subitem["id"], f"{subitem['name']} Parte 2")
+                    # Duplicate the subitem to create Part 1 first, then Part 2 (so Part 1 appears on top)
                     part1_id = duplicate_subitem(subitem["id"], f"{subitem['name']} Parte 1")
+                    part2_id = duplicate_subitem(subitem["id"], f"{subitem['name']} Parte 2")
                     
                     if part1_id and part2_id:
-                        # Part 1 gets the remaining value in numeric_mks6ywg8 and gets processed
-                        update_subitem_column(part1_id, "numeric_mks6ywg8", remaining_value, subitem_board_id)
+                        # Part 1 gets the remaining value in the appropriate deduction column and gets processed
+                        update_subitem_column(part1_id, deduction_column, remaining_value, subitem_board_id)
                         update_subitem_column(part1_id, "numeric_mks6p0bv", numeric_value, subitem_board_id)
                         
-                        # Part 2 gets the difference in numeric_mks6ywg8 (not processed yet)
+                        # Part 2 gets the difference in the appropriate deduction column (not processed yet)
                         part2_deduction = subitem_deduction_value - remaining_value
-                        update_subitem_column(part2_id, "numeric_mks6ywg8", part2_deduction, subitem_board_id)
+                        update_subitem_column(part2_id, deduction_column, part2_deduction, subitem_board_id)
                         
                         # Delete the original subitem after creating the duplicates
                         if delete_item(subitem["id"], subitem_board_id):
@@ -477,8 +507,8 @@ def distribute_values(item_data):
                         })
                         
                         logger.info(f"Created {subitem['name']} Parte 1 and Parte 2")
-                        logger.info(f"Parte 1: numeric_mks6ywg8={remaining_value}, numeric_mks6p0bv={numeric_value}")
-                        logger.info(f"Parte 2: numeric_mks6ywg8={part2_deduction}")
+                        logger.info(f"Parte 1: {deduction_column}={remaining_value}, numeric_mks6p0bv={numeric_value}")
+                        logger.info(f"Parte 2: {deduction_column}={part2_deduction}")
                         
                         # Set remaining to 0 since we've used it all
                         remaining_value = 0
@@ -645,10 +675,10 @@ def distribuir():
             logger.error("Could not retrieve item data from Monday.com")
             return jsonify({"error": "Could not retrieve item data"}), 400
         
-        # Validate that we have the required data (dropdown must have a value)
-        if not item_data.get("dropdown_mks68t35"):
-            logger.info(f"Item {item_name} has no dropdown value set, skipping processing")
-            return jsonify({"message": "No dropdown value set, skipping processing"}), 200
+        # Validate that we have the required data (status column must have a value)
+        if not item_data.get("color_mks7xywc"):
+            logger.info(f"Item {item_name} has no status value set, skipping processing")
+            return jsonify({"message": "No status value set, skipping processing"}), 200
         
         if item_data.get("numeric_mks63qc1", 0) <= 0:
             logger.info(f"Item {item_name} has no value to distribute")
